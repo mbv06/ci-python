@@ -14,6 +14,8 @@ FROM node:${NODE_VERSION}-trixie-slim AS node
 
 FROM python:${PYTHON_VERSION}-slim-trixie
 
+LABEL org.opencontainers.image.description="A minimal Docker image with Python and essential CI tools, ready for running tests, builds, and other automation tasks."
+
 # renovate: datasource=npm depName=npm
 ARG NPM_VERSION=11.17.0
 # renovate: datasource=pypi depName=pip versioning=pep440

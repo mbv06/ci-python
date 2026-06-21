@@ -17,6 +17,9 @@ on:
 permissions:
   contents: read
 
+env:
+  IMAGE_DESCRIPTION: A minimal Docker image with Python and essential CI tools, ready for running tests, builds, and other automation tasks.
+
 jobs:
   secret-scan:
     name: Gitleaks secret scan
@@ -25,7 +28,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Full history so gitleaks can scan all commits, not just the tip.
           fetch-depth: 0
@@ -54,7 +57,7 @@ jobs:
               {"python":"3.11","node":"24","cooldown":"7","suffix":""},
               {"python":"3.13","node":"24","cooldown":"7","suffix":""},
               {"python":"3.14","node":"24","cooldown":"7","suffix":""},
-              {"python":"3.13","node":"24","cooldown":"3","suffix":"-cd3"},
+              {"python":"3.13","node":"24","cooldown":"3","suffix":"-cd3"}
             ]'
           else
             is_release=false
@@ -71,6 +74,9 @@ jobs:
     name: Build py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }} (${{ matrix.platform.name }})
     needs: [secret-scan, setup]
     runs-on: ${{ matrix.platform.runner }}
+    env:
+      # Matrix jobs are consolidated into the single summary job below.
+      DOCKER_BUILD_SUMMARY: "false"
     permissions:
       contents: read
       packages: write
@@ -84,13 +90,13 @@ jobs:
           - { name: arm64, runner: ubuntu-24.04-arm, docker: linux/arm64 }
         variant: ${{ fromJSON(needs.setup.outputs.variants) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         if: needs.setup.outputs.is_release == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -98,7 +104,7 @@ jobs:
 
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform.docker }}
@@ -120,7 +126,7 @@ jobs:
 
       - name: Upload digest
         if: needs.setup.outputs.is_release == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # Cooldown is baked into the name (cd7/cd3) so the merge job's glob never
           # confuses a default variant with its -cd3 sibling.
@@ -143,16 +149,16 @@ jobs:
         variant: ${{ fromJSON(needs.setup.outputs.variants) }}
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digest-py${{ matrix.variant.python }}-node${{ matrix.variant.node }}-cd${{ matrix.variant.cooldown }}-*
           merge-multiple: true
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -160,7 +166,7 @@ jobs:
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/ci-python
           tags: |
@@ -173,6 +179,7 @@ jobs:
         working-directory: /tmp/digests
         run: |
           docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.description=$IMAGE_DESCRIPTION" \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf 'ghcr.io/${{ github.repository_owner }}/ci-python@sha256:%s ' *)
 
@@ -180,3 +187,61 @@ jobs:
         run: |
           docker buildx imagetools inspect \
             ghcr.io/${{ github.repository_owner }}/ci-python:py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }}
+
+  summary:
+    name: CI summary
+    needs: [secret-scan, setup, build, merge]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    env:
+      SECRET_SCAN_RESULT: ${{ needs.secret-scan.result }}
+      SETUP_RESULT: ${{ needs.setup.result }}
+      BUILD_RESULT: ${{ needs.build.result }}
+      MERGE_RESULT: ${{ needs.merge.result }}
+      IS_RELEASE: ${{ needs.setup.outputs.is_release }}
+      VARIANTS: ${{ needs.setup.outputs.variants }}
+    steps:
+      - name: Write consolidated summary
+        shell: bash
+        run: |
+          status() {
+            case "$1" in
+              success) echo "✅ success" ;;
+              failure) echo "❌ failure" ;;
+              cancelled) echo "🚫 cancelled" ;;
+              skipped) echo "⏭️ skipped" ;;
+              *) echo "❔ ${1:-unknown}" ;;
+            esac
+          }
+
+          {
+            echo "## CI build summary"
+            echo
+            echo "| Stage | Result |"
+            echo "| --- | --- |"
+            echo "| Secret scan | $(status "$SECRET_SCAN_RESULT") |"
+            echo "| Matrix setup | $(status "$SETUP_RESULT") |"
+            echo "| Image builds | $(status "$BUILD_RESULT") |"
+            if [ "$IS_RELEASE" = "true" ]; then
+              echo "| Multi-platform manifests | $(status "$MERGE_RESULT") |"
+            else
+              echo "| Multi-platform manifests | ⏭️ validation run |"
+            fi
+
+            if [ -n "$VARIANTS" ]; then
+              echo
+              echo "### Targets"
+              echo
+              echo "| Image | Cooldown | Platforms | Mode |"
+              echo "| --- | ---: | --- | --- |"
+              while IFS=$'\t' read -r python node cooldown suffix; do
+                image="py${python}-node${node}${suffix}"
+                if [ "$IS_RELEASE" = "true" ]; then
+                  mode="published"
+                else
+                  mode="build only"
+                fi
+                echo "| \`$image\` | $cooldown days | amd64, arm64 | $mode |"
+              done < <(jq -r '.[] | [.python, .node, .cooldown, .suffix] | @tsv' <<< "$VARIANTS")
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
