@@ -1,0 +1,46 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard"
+  ],
+  "labels": ["dependencies"],
+  "minimumReleaseAge": "7 days",
+  "internalChecksFilter": "strict",
+  "schedule": ["before 5am on the first day of the month"],
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "labels": ["security"]
+  },
+  "packageRules": [
+    {
+      "description": "Stay on the Python 3.13 line; major/minor Python bumps are a deliberate decision, not an automated one.",
+      "matchManagers": ["dockerfile"],
+      "matchDepNames": ["python"],
+      "matchUpdateTypes": ["major", "minor"],
+      "enabled": false
+    },
+    {
+      "description": "Stay on the Node.js 24 line; major bumps are a deliberate decision.",
+      "matchManagers": ["dockerfile"],
+      "matchDepNames": ["node"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    },
+    {
+      "description": "Group all non-major updates into a single PR",
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "all non-major dependencies"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track tool versions annotated with `# renovate:` in the Dockerfile (npm, pip, Node.js).",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>\\S+?)(?: versioning=(?<versioning>[a-z-]+?))?(?: extractVersion=(?<extractVersion>\\S+?))?\\s+ARG [A-Z0-9_]+=(?<currentValue>\\S+)"
+      ]
+    }
+  ]
+}

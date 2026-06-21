@@ -1,0 +1,182 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "Dockerfile"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+# Least-privilege by default; individual jobs widen scope only as needed.
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: Gitleaks secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history so gitleaks can scan all commits, not just the tip.
+          fetch-depth: 0
+
+      - name: gitleaks scan
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  setup:
+    name: Generate build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      variants: ${{ steps.set.outputs.variants }}
+      is_release: ${{ steps.set.outputs.is_release }}
+    steps:
+      - id: set
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          # Release = main branch or version tag → full matrix, push enabled.
+          # Everything else (feature branches) → single "latest" variant, build-only.
+          if [ "$REF" = "refs/heads/main" ] || [[ "$REF" == refs/tags/* ]]; then
+            is_release=true
+            variants='[
+              {"python":"3.11","node":"24","cooldown":"7","suffix":""},
+              {"python":"3.13","node":"24","cooldown":"7","suffix":""},
+              {"python":"3.14","node":"24","cooldown":"7","suffix":""},
+              {"python":"3.13","node":"24","cooldown":"3","suffix":"-cd3"},
+            ]'
+          else
+            is_release=false
+            variants='[{"python":"3.13","node":"24","cooldown":"7","suffix":""}]'
+          fi
+          echo "is_release=$is_release" >> "$GITHUB_OUTPUT"
+          {
+            echo 'variants<<EOF'
+            echo "$variants"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }} (${{ matrix.platform.name }})
+    needs: [secret-scan, setup]
+    runs-on: ${{ matrix.platform.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each arch builds natively on its own runner; the merge job stitches the
+        # per-arch digests into one multi-platform manifest per tag.
+        platform:
+          - { name: amd64, runner: ubuntu-latest, docker: linux/amd64 }
+          - { name: arm64, runner: ubuntu-24.04-arm, docker: linux/arm64 }
+        variant: ${{ fromJSON(needs.setup.outputs.variants) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: needs.setup.outputs.is_release == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform.docker }}
+          build-args: |
+            PYTHON_VERSION=${{ matrix.variant.python }}
+            COOLDOWN_DAYS=${{ matrix.variant.cooldown }}
+          # Push by digest only (no tags); the merge job assembles the manifest list.
+          # On PRs and feature branches we build to validate but push nothing.
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/ci-python,push-by-digest=true,name-canonical=true,push=${{ needs.setup.outputs.is_release == 'true' }}
+          cache-from: type=gha,scope=py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }}-${{ matrix.platform.name }}
+          cache-to: type=gha,mode=max,scope=py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }}-${{ matrix.platform.name }}
+
+      - name: Export digest
+        if: needs.setup.outputs.is_release == 'true'
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: needs.setup.outputs.is_release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          # Cooldown is baked into the name (cd7/cd3) so the merge job's glob never
+          # confuses a default variant with its -cd3 sibling.
+          name: digest-py${{ matrix.variant.python }}-node${{ matrix.variant.node }}-cd${{ matrix.variant.cooldown }}-${{ matrix.platform.name }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }}
+    needs: [build, setup]
+    if: needs.setup.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(needs.setup.outputs.variants) }}
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-py${{ matrix.variant.python }}-node${{ matrix.variant.node }}-cd${{ matrix.variant.cooldown }}-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/ci-python
+          tags: |
+            type=raw,value=py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }}
+            type=raw,value=py${{ matrix.variant.python }}${{ matrix.variant.suffix }},enable=${{ matrix.variant.node == '24' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' && matrix.variant.python == '3.13' && matrix.variant.node == '24' && matrix.variant.cooldown == '7' }}
+            type=sha,prefix=py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }}-
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ github.repository_owner }}/ci-python@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect \
+            ghcr.io/${{ github.repository_owner }}/ci-python:py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }}
