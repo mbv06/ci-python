@@ -23,7 +23,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# Least-privilege by default; individual jobs widen scope only as needed.
 permissions:
   contents: read
 
@@ -34,6 +33,9 @@ jobs:
   setup:
     name: Generate build matrix
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       variants: ${{ steps.set.outputs.variants }}
       is_release: ${{ steps.set.outputs.is_release }}
@@ -41,20 +43,42 @@ jobs:
       - id: set
         env:
           REF: ${{ github.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # Release = main branch → full matrix, push enabled.
-          # Everything else (feature branches / PRs) → single "latest" variant, build-only.
+          full_variants='[
+            {"python":"3.11","node":"24","cooldown":"7","suffix":""},
+            {"python":"3.13","node":"24","cooldown":"7","suffix":""},
+            {"python":"3.14","node":"24","cooldown":"7","suffix":""},
+            {"python":"3.13","node":"24","cooldown":"3","suffix":"-cd3"}
+          ]'
+          slim_variants='[{"python":"3.13","node":"24","cooldown":"7","suffix":""}]'
+
+          # Release = main → full matrix, push enabled.
+          # PRs that touch Dockerfile → full matrix, build-only (variants share one Dockerfile).
+          # Other validation runs → single "latest" variant, build-only.
+          is_release=false
+          use_full=false
           if [ "$REF" = "refs/heads/main" ]; then
             is_release=true
-            variants='[
-              {"python":"3.11","node":"24","cooldown":"7","suffix":""},
-              {"python":"3.13","node":"24","cooldown":"7","suffix":""},
-              {"python":"3.14","node":"24","cooldown":"7","suffix":""},
-              {"python":"3.13","node":"24","cooldown":"3","suffix":"-cd3"}
-            ]'
+            use_full=true
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            if ! changed_files="$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+              --jq '.[].filename')"; then
+              echo "::error::Failed to list changed files for pull request #${PR_NUMBER}"
+              exit 1
+            fi
+            if grep -qx 'Dockerfile' <<< "$changed_files"; then
+              use_full=true
+            fi
+          fi
+
+          if [ "$use_full" = true ]; then
+            variants="$full_variants"
           else
-            is_release=false
-            variants='[{"python":"3.13","node":"24","cooldown":"7","suffix":""}]'
+            variants="$slim_variants"
           fi
           echo "is_release=$is_release" >> "$GITHUB_OUTPUT"
           {
@@ -120,11 +144,41 @@ jobs:
             COOLDOWN_DAYS=${{ matrix.variant.cooldown }}
           # Scheduled runs skip cache so apt-get layers actually refresh.
           no-cache: ${{ github.event_name == 'schedule' }}
-          # Push by digest only (no tags); the merge job assembles the manifest list.
-          # On PRs and feature branches we build to validate but push nothing.
-          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/ci-python,push-by-digest=true,name-canonical=true,push=${{ needs.setup.outputs.is_release == 'true' }}
+          # Release: push by digest for the merge job. Validation: load into the
+          # local daemon so the smoke step can docker run without pushing.
+          outputs: ${{ needs.setup.outputs.is_release == 'true' && format('type=image,name=ghcr.io/{0}/ci-python,push-by-digest=true,name-canonical=true,push=true', github.repository_owner) || 'type=docker,name=ci-python:smoke' }}
           cache-from: type=gha,scope=py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }}-${{ matrix.platform.name }}
           cache-to: type=gha,mode=max,scope=py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }}-${{ matrix.platform.name }}
+
+      - name: Smoke test
+        env:
+          IS_RELEASE: ${{ needs.setup.outputs.is_release }}
+          COOLDOWN_DAYS: ${{ matrix.variant.cooldown }}
+          PYTHON_VERSION: ${{ matrix.variant.python }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          if [ "$IS_RELEASE" = "true" ]; then
+            image="ghcr.io/${{ github.repository_owner }}/ci-python@${DIGEST}"
+          else
+            image="ci-python:smoke"
+          fi
+          docker run --rm \
+            -e COOLDOWN_DAYS \
+            -e PYTHON_VERSION \
+            "$image" \
+            bash -c '
+              set -euo pipefail
+              python --version
+              pip --version
+              node --version
+              npm --version
+              uv --version
+              git --version
+              python -c "import os, sys; v=os.environ[\"PYTHON_VERSION\"]; assert sys.version_info[:2] == tuple(map(int, v.split(\".\"))), sys.version"
+              test "$(npm config get min-release-age)" = "$COOLDOWN_DAYS"
+              grep -q "uploaded-prior-to = P${COOLDOWN_DAYS}D" /etc/pip.conf
+              grep -q "exclude-newer = \"P${COOLDOWN_DAYS}D\"" /etc/uv/uv.toml
+            '
 
       - name: Export digest
         if: needs.setup.outputs.is_release == 'true'
