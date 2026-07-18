@@ -27,7 +27,7 @@ The supported set is the matrix in [`.github/workflows/ci.yml`](.github/workflow
 
 **Cooldown.** To avoid freshly-published (potentially compromised) packages, the image
 ignores releases newer than `COOLDOWN_DAYS` (default `7`), configured system-wide for
-npm (`/etc/npmrc`), pip (`/etc/pip.conf`) and uv (`/etc/uv/uv.toml`). The `-cd3` tags
+npm (`/usr/local/etc/npmrc`), pip (`/etc/pip.conf`) and uv (`/etc/uv/uv.toml`). The `-cd3` tags
 use a shorter 3-day window.
 
 ## Build
@@ -55,6 +55,7 @@ container: ghcr.io/mbv06/ci-python:py3.13-node24
 
 ## Maintenance
 
-- [`.github/workflows/ci.yml`](.github/workflows/ci.yml): Gitleaks secret scan, then builds and pushes every matrix variant to GHCR via `GITHUB_TOKEN`.
+- [`.github/workflows/ci.yml`](.github/workflows/ci.yml): builds and pushes every matrix variant to GHCR via `GITHUB_TOKEN`.
+- [`.github/workflows/gitleaks.yml`](.github/workflows/gitleaks.yml): Gitleaks secret scan on every push and pull request (no path filter).
 - [`renovate.json`](renovate.json) keeps the base image, uv, npm, pip, Node.js and CI actions up to date. The variant set stays manual in the matrix.
-- Cooldown (`COOLDOWN_DAYS`) via `/etc/npmrc`, `/etc/pip.conf` and `/etc/uv/uv.toml`; see [Variants](#variants).
+- Cooldown (`COOLDOWN_DAYS`) via `/usr/local/etc/npmrc`, `/etc/pip.conf` and `/etc/uv/uv.toml`; see [Variants](#variants).

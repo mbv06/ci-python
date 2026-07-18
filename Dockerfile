@@ -60,8 +60,12 @@ RUN npm install -g "npm@${NPM_VERSION}" \
 
 # Supply-chain cooldown: ignore packages published in the last COOLDOWN_DAYS days.
 # (system-level defaults; a project can still override exclude-newer for uv)
-RUN printf 'min-release-age=%s\naudit=false\nfund=false\n' "${COOLDOWN_DAYS}" > /etc/npmrc \
- && printf '[install]\nuploaded-prior-to = P%sD\n' "${COOLDOWN_DAYS}" > /etc/pip.conf \
+# npm reads $PREFIX/etc/npmrc (/usr/local/etc/npmrc), not /etc/npmrc.
+# pip: [global] so uploaded-prior-to applies to install/wheel/download (not only [install]).
+RUN mkdir -p /usr/local/etc \
+ && printf 'min-release-age=%s\naudit=false\nfund=false\n' "${COOLDOWN_DAYS}" > /usr/local/etc/npmrc \
+ && test "$(npm config get min-release-age)" = "${COOLDOWN_DAYS}" \
+ && printf '[global]\nuploaded-prior-to = P%sD\n' "${COOLDOWN_DAYS}" > /etc/pip.conf \
  && mkdir -p /etc/uv \
  && printf 'exclude-newer = "P%sD"\n' "${COOLDOWN_DAYS}" > /etc/uv/uv.toml
 

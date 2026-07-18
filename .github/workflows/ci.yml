@@ -3,7 +3,6 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ["v*"]
     paths:
       - "Dockerfile"
       - ".github/workflows/ci.yml"
@@ -13,6 +12,12 @@ on:
       - ".github/workflows/ci.yml"
   workflow_dispatch:
 
+# One active run per ref; a newer push cancels an in-flight publish so rolling
+# tags cannot land from an older commit that finished later.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Least-privilege by default; individual jobs widen scope only as needed.
 permissions:
   contents: read
@@ -21,23 +26,6 @@ env:
   IMAGE_DESCRIPTION: A minimal Docker image with Python and essential CI tools, ready for running tests, builds, and other automation tasks.
 
 jobs:
-  secret-scan:
-    name: Gitleaks secret scan
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          # Full history so gitleaks can scan all commits, not just the tip.
-          fetch-depth: 0
-
-      - name: gitleaks scan
-        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   setup:
     name: Generate build matrix
     runs-on: ubuntu-latest
@@ -49,9 +37,9 @@ jobs:
         env:
           REF: ${{ github.ref }}
         run: |
-          # Release = main branch or version tag → full matrix, push enabled.
-          # Everything else (feature branches) → single "latest" variant, build-only.
-          if [ "$REF" = "refs/heads/main" ] || [[ "$REF" == refs/tags/* ]]; then
+          # Release = main branch → full matrix, push enabled.
+          # Everything else (feature branches / PRs) → single "latest" variant, build-only.
+          if [ "$REF" = "refs/heads/main" ]; then
             is_release=true
             variants='[
               {"python":"3.11","node":"24","cooldown":"7","suffix":""},
@@ -72,7 +60,7 @@ jobs:
 
   build:
     name: Build py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }} (${{ matrix.platform.name }})
-    needs: [secret-scan, setup]
+    needs: [setup]
     runs-on: ${{ matrix.platform.runner }}
     env:
       # Matrix jobs are consolidated into the single summary job below.
@@ -190,11 +178,10 @@ jobs:
 
   summary:
     name: CI summary
-    needs: [secret-scan, setup, build, merge]
+    needs: [setup, build, merge]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     env:
-      SECRET_SCAN_RESULT: ${{ needs.secret-scan.result }}
       SETUP_RESULT: ${{ needs.setup.result }}
       BUILD_RESULT: ${{ needs.build.result }}
       MERGE_RESULT: ${{ needs.merge.result }}
@@ -219,7 +206,6 @@ jobs:
             echo
             echo "| Stage | Result |"
             echo "| --- | --- |"
-            echo "| Secret scan | $(status "$SECRET_SCAN_RESULT") |"
             echo "| Matrix setup | $(status "$SETUP_RESULT") |"
             echo "| Image builds | $(status "$BUILD_RESULT") |"
             if [ "$IS_RELEASE" = "true" ]; then
@@ -245,3 +231,28 @@ jobs:
               done < <(jq -r '.[] | [.python, .node, .cooldown, .suffix] | @tsv' <<< "$VARIANTS")
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Required check: succeed only when every job that should have run succeeded.
+      # On validation runs merge is skipped by design; treat that as OK.
+      - name: Fail if any required job failed
+        shell: bash
+        run: |
+          failed=0
+          if [ "$SETUP_RESULT" != "success" ]; then
+            echo "setup: $SETUP_RESULT"
+            failed=1
+          fi
+          if [ "$BUILD_RESULT" != "success" ]; then
+            echo "build: $BUILD_RESULT"
+            failed=1
+          fi
+          if [ "$IS_RELEASE" = "true" ]; then
+            if [ "$MERGE_RESULT" != "success" ]; then
+              echo "merge: $MERGE_RESULT"
+              failed=1
+            fi
+          elif [ "$MERGE_RESULT" != "skipped" ] && [ "$MERGE_RESULT" != "success" ]; then
+            echo "merge: $MERGE_RESULT"
+            failed=1
+          fi
+          exit "$failed"
