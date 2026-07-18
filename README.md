@@ -21,7 +21,9 @@ Each tag supports both `linux/amd64` and `linux/arm64`.
 - `py3.11`, `py3.13`, `py3.14` — short aliases for the same pairs
 - `py3.13-node24-cd3`, … — variants with a shorter 3-day cooldown
 - `latest` — the default variant (Python 3.13)
-- `py3.13-node24-sha-<commit>` — immutable pin
+- `py3.13-node24-sha-<commit>` — commit-addressed tag (written only on push; not retargeted by scheduled rebuilds)
+
+For a truly immutable pin use the image digest (`ghcr.io/mbv06/ci-python@sha256:…`), not a tag.
 
 The supported set is the matrix in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
@@ -32,15 +34,20 @@ use a shorter 3-day window.
 
 ## Build
 
+Base-image inputs (`uv`, `node`, `python`) are pinned by digest in the [`Dockerfile`](Dockerfile)
+and auditable; Renovate refreshes those digests when the tags move. OS packages installed
+via apt are intentionally not pinned and may change on rebuild.
+
 ```bash
 docker build -t ci-python:py3.13-node24 .
 ```
 
-Override the build args from the top of the [`Dockerfile`](Dockerfile) for another variant:
+Override the Python base (use the matching `PYTHON_IMAGE_*` pin from the Dockerfile)
+and cooldown for another variant:
 
 ```bash
 docker build \
-  --build-arg PYTHON_VERSION=3.14 \
+  --build-arg PYTHON_IMAGE=python:3.14-slim-trixie@sha256:<digest> \
   --build-arg COOLDOWN_DAYS=3 \
   -t ci-python:py3.14-node24-cd3 .
 ```
@@ -55,7 +62,7 @@ container: ghcr.io/mbv06/ci-python:py3.13-node24
 
 ## Maintenance
 
-- [`.github/workflows/ci.yml`](.github/workflows/ci.yml): builds and pushes every matrix variant to GHCR via `GITHUB_TOKEN`.
+- [`.github/workflows/ci.yml`](.github/workflows/ci.yml): builds and pushes every matrix variant to GHCR via `GITHUB_TOKEN`. Also runs a monthly no-cache rebuild (`schedule`) so OS packages stay fresh even when base digests are unchanged (rolling tags only; commit-addressed SHA tags are push-only). On public repos GitHub disables `schedule` after 60 days without repository activity.
 - [`.github/workflows/gitleaks.yml`](.github/workflows/gitleaks.yml): Gitleaks secret scan on every push and pull request (no path filter).
-- [`renovate.json`](renovate.json) keeps the base image, uv, npm, pip, Node.js and CI actions up to date. The variant set stays manual in the matrix.
+- [`renovate.json`](renovate.json) pins and updates base-image digests (`docker:pinDigests`), plus npm, pip and CI actions. The variant set stays manual in the matrix.
 - Cooldown (`COOLDOWN_DAYS`) via `/usr/local/etc/npmrc`, `/etc/pip.conf` and `/etc/uv/uv.toml`; see [Variants](#variants).

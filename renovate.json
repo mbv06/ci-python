@@ -2,6 +2,7 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended",
+    "docker:pinDigests",
     ":dependencyDashboard"
   ],
   "labels": ["dependencies"],
@@ -14,15 +15,15 @@
   },
   "packageRules": [
     {
-      "description": "Stay on the Python 3.13 line; major/minor Python bumps are a deliberate decision, not an automated one.",
-      "matchManagers": ["dockerfile"],
+      "description": "Stay on the current Python minor lines; major/minor Python bumps are a deliberate decision, not an automated one.",
+      "matchDatasources": ["docker"],
       "matchDepNames": ["python"],
       "matchUpdateTypes": ["major", "minor"],
       "enabled": false
     },
     {
       "description": "Stay on the Node.js 24 line; major bumps are a deliberate decision.",
-      "matchManagers": ["dockerfile"],
+      "matchDatasources": ["docker"],
       "matchDepNames": ["node"],
       "matchUpdateTypes": ["major"],
       "enabled": false
@@ -36,10 +37,20 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Track tool versions annotated with `# renovate:` in the Dockerfile (npm, pip, Node.js).",
+      "description": "Track digest-pinned Python matrix bases (PYTHON_IMAGE_*) in the Dockerfile.",
       "managerFilePatterns": ["/(^|/)Dockerfile$/"],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>\\S+?)(?: versioning=(?<versioning>[a-z-]+?))?(?: extractVersion=(?<extractVersion>\\S+?))?\\s+ARG [A-Z0-9_]+=(?<currentValue>\\S+)"
+        "# renovate: datasource=docker depName=(?<depName>\\S+)\\s+ARG [A-Z0-9_]+=(?:[^:@\\s]+/)*[^:@\\s]+:(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[0-9a-f]+)"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Track tool versions annotated with # renovate: in the Dockerfile (npm, pip).",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>npm|pypi) depName=(?<depName>\\S+?)(?: versioning=(?<versioning>[a-z-]+?))?(?: extractVersion=(?<extractVersion>\\S+?))?\\s+ARG [A-Z0-9_]+=(?<currentValue>\\S+)"
       ]
     }
   ]

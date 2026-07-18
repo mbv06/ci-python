@@ -10,13 +10,18 @@ on:
     paths:
       - "Dockerfile"
       - ".github/workflows/ci.yml"
+  # Monthly no-cache rebuild so apt packages stay fresh even when digests are unchanged.
+  # Renovate bumps base digests on its own schedule; this run republishes rolling tags only.
+  # Minute offset avoids GitHub's top-of-hour schedule contention.
+  schedule:
+    - cron: "17 6 1 * *"
   workflow_dispatch:
 
-# One active run per ref; a newer push cancels an in-flight publish so rolling
-# tags cannot land from an older commit that finished later.
+# One active run per ref. Cancel superseded PR/validation runs, but never cancel an
+# in-flight main publish — that can leave GHCR with a mixed set of variant tags.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Least-privilege by default; individual jobs widen scope only as needed.
 permissions:
@@ -80,6 +85,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Resolve Python base image pin
+        id: base
+        shell: bash
+        run: |
+          # Map matrix python (e.g. 3.13) → Dockerfile ARG PYTHON_IMAGE_3_13=image:tag@sha256:...
+          key="PYTHON_IMAGE_$(echo '${{ matrix.variant.python }}' | tr . _)"
+          image="$(sed -n "s/^ARG ${key}=//p" Dockerfile)"
+          if [ -z "$image" ]; then
+            echo "::error::Missing ARG ${key}=... in Dockerfile"
+            exit 1
+          fi
+          echo "Using ${key}=${image}"
+          echo "python_image=${image}" >> "$GITHUB_OUTPUT"
+
       - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
@@ -97,8 +116,10 @@ jobs:
           context: .
           platforms: ${{ matrix.platform.docker }}
           build-args: |
-            PYTHON_VERSION=${{ matrix.variant.python }}
+            PYTHON_IMAGE=${{ steps.base.outputs.python_image }}
             COOLDOWN_DAYS=${{ matrix.variant.cooldown }}
+          # Scheduled runs skip cache so apt-get layers actually refresh.
+          no-cache: ${{ github.event_name == 'schedule' }}
           # Push by digest only (no tags); the merge job assembles the manifest list.
           # On PRs and feature branches we build to validate but push nothing.
           outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/ci-python,push-by-digest=true,name-canonical=true,push=${{ needs.setup.outputs.is_release == 'true' }}
@@ -161,7 +182,8 @@ jobs:
             type=raw,value=py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }}
             type=raw,value=py${{ matrix.variant.python }}${{ matrix.variant.suffix }},enable=${{ matrix.variant.node == '24' }}
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' && matrix.variant.python == '3.13' && matrix.variant.node == '24' && matrix.variant.cooldown == '7' }}
-            type=sha,prefix=py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }}-
+            # Commit-addressed tag only on push: schedule rebuilds must not retarget the same SHA tag.
+            type=sha,prefix=py${{ matrix.variant.python }}-node${{ matrix.variant.node }}${{ matrix.variant.suffix }}-,enable=${{ github.event_name == 'push' }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests

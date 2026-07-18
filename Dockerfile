@@ -2,22 +2,30 @@
 # Jobs run directly inside this container (no Docker CLI, no docker.sock).
 # Node.js is bundled because `uses:` actions (e.g. actions/checkout) run with node.
 
-# Versions are build args / FROM tags, kept up to date by Renovate (renovate.json).
-# PYTHON_VERSION / NODE_VERSION select the build variant (see the CI matrix).
-ARG UV_VERSION=0.11.23
-ARG PYTHON_VERSION=3.13
-# renovate: datasource=docker depName=node versioning=node
-ARG NODE_VERSION=24.17.0
+# Base images are pinned by digest (tags alone are mutable). Renovate updates
+# tags + digests (docker:pinDigests for FROM lines; customManagers for the
+# PYTHON_IMAGE_* matrix pins below).
+#
+# ARGs used by FROM must be declared before the first FROM.
 
-FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
-FROM node:${NODE_VERSION}-trixie-slim AS node
+# CI matrix Python bases. The build selects one with --build-arg PYTHON_IMAGE=...
+# (default: 3.13). Kept as ARGs so Renovate can bump each digest independently.
+# renovate: datasource=docker depName=python
+ARG PYTHON_IMAGE_3_11=python:3.11-slim-trixie@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93
+# renovate: datasource=docker depName=python
+ARG PYTHON_IMAGE_3_13=python:3.13-slim-trixie@sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91
+# renovate: datasource=docker depName=python
+ARG PYTHON_IMAGE_3_14=python:3.14-slim-trixie@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6
+ARG PYTHON_IMAGE=${PYTHON_IMAGE_3_13}
 
-FROM python:${PYTHON_VERSION}-slim-trixie
+FROM ghcr.io/astral-sh/uv:0.11.29@sha256:eb2843a1e56fd9e30c7276ce1a52cba86e64c7b385f5e3279a0e08e02dd058fc AS uv
+FROM node:24.18.0-trixie-slim@sha256:ae91dcc111a68c9d2d81ff2a17bda61be126426176fde6fe7d08ab13b7f50573 AS node
+FROM ${PYTHON_IMAGE}
 
 LABEL org.opencontainers.image.description="A minimal Docker image with Python and essential CI tools, ready for running tests, builds, and other automation tasks."
 
 # renovate: datasource=npm depName=npm
-ARG NPM_VERSION=11.17.0
+ARG NPM_VERSION=11.18.0
 # renovate: datasource=pypi depName=pip versioning=pep440
 ARG PIP_VERSION=26.1.2
 # Supply-chain cooldown window in days (see the RUN that writes the configs below).
